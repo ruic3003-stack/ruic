@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>3D Cosmic Exploration</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+        }
+        canvas {
+            display: block;
+            width: 100% !important;
+            height: 100% !important;
+        }
+        /* 极简高级感科技 UI */
+        #ui-layer {
+            position: absolute;
+            bottom: 40px;
+            width: 100%;
+            display: flex;
+            justify-content: center;
+            pointer-events: none;
+            animation: fadeOutContainer 1s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+            animation-delay: 4s; 
+        }
+        .instruction {
+            background: rgba(255, 255, 255, 0.03);
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            padding: 10px 22px;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 10px;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            color: rgba(255, 255, 255, 0.6);
+            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.5);
+        }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 12px;
+            letter-spacing: 4px;
+            color: rgba(255,255,255,0.4);
+            transition: opacity 0.6s ease;
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+</head>
+<body>
+    <div id="loading">INITIALIZING COSMOS...</div>
+    <div id="canvas-container"></div>
+    <div id="ui-layer">
+        <div class="instruction">DRAG TO ROTATE  •  PINCH TO ZOOM</div>
+    </div>
+
+    <script>
+        // 全局变量定义与容器准备
+        let scene, camera, renderer, controls;
+        let time = 0;
+        
+        const objects = {
+            planets: [], earth: null, clouds: null, orbits: [],
+            comet: null, cometTrail: null, galaxyParticles: null, ambientStars: null,
+            solarSystemGroup: new THREE.Group()
+        };
+        // 过程化纹理生成（100%无需外部图片，防加载失败）
+        const TextureGen = {
+            glow() {
+                const cvs = document.createElement('canvas'); cvs.width = 64; cvs.height = 64; const ctx = cvs.getContext('2d');
+                const grad = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+                grad.addColorStop(0, 'rgba(255,255,255,1)'); grad.addColorStop(0.3, 'rgba(255,255,255,0.6)');
+                grad.addColorStop(0.7, 'rgba(255,255,255,0.1)'); grad.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = grad; ctx.fillRect(0, 0, 64, 64); return new THREE.CanvasTexture(cvs);
+            },
+            earthDay() {
+                const cvs = document.createElement('canvas'); cvs.width = 512; cvs.height = 256; const ctx = cvs.getContext('2d');
+                ctx.fillStyle = '#0f2b46'; ctx.fillRect(0, 0, 512, 256); ctx.fillStyle = '#27ae60';
+                for(let i=0; i<40; i++) { ctx.beginPath(); ctx.arc(Math.random()*512, Math.random()*256, Math.random()*40+15, 0, Math.PI*2); ctx.fill(); }
+                return new THREE.CanvasTexture(cvs);
+            },
+            earthNight() {
+                const cvs = document.createElement('canvas'); cvs.width = 512; cvs.height = 256; const ctx = cvs.getContext('2d');
+                ctx.fillStyle = '#030308'; ctx.fillRect(0, 0, 512, 256); ctx.fillStyle = '#f1c40f';
+                for(let i=0; i<600; i++) { ctx.fillRect(Math.random()*512, Math.random()*256, 1.5, 1.5); }
+                return new THREE.CanvasTexture(cvs);
+            },
+            clouds() {
+                const cvs = document.createElement('canvas'); cvs.width = 512; cvs.height = 256; const ctx = cvs.getContext('2d');
+                ctx.fillStyle = 'rgba(0,0,0,0)'; ctx.fillRect(0, 0, 512, 256); ctx.fillStyle = 'rgba(255,255,255,0.35)';
+                for(let i=0; i<60; i++) { ctx.beginPath(); ctx.arc(Math.random()*512, Math.random()*256, Math.random()*25+5, 0, Math.PI*2); ctx.fill(); }
+                return new THREE.CanvasTexture(cvs);
+            }
+        };
+
+        const textures = {
+            glow: TextureGen.glow(), day: TextureGen.earthDay(), night: TextureGen.earthNight(), clouds: TextureGen.clouds()
+        };
+
+        // 安全获取移动端不为0的视口大小，杜绝手机浏览器画布塌陷
+        function getSafeSize() {
+            const container = document.getElementById('canvas-container');
+            let w = container.clientWidth || window.innerWidth || screen.width || 360;
+            let h = container.clientHeight || window.innerHeight || screen.height || 640;
+            if(w <= 0) w = 360; if(h <= 0) h = 640;
+            return { width: w, height: h };
+        }
+
+        function buildEarth() {
+            const earthGroup = new THREE.Group();
+            
+            // 彻底弃用自定义着色器，改用100%全机型兼容的标准物理材质
+            objects.earth = new THREE.Mesh(
+                new THREE.SphereGeometry(1, 32, 32),
+                new THREE.MeshStandardMaterial({
+                    map: textures.day,
+                    emissive: new THREE.Color(0xffe17d),
+                    emissiveMap: textures.night,
+                    emissiveIntensity: 0.6,
+                    roughness: 0.5,
+                    metalness: 0.1
+                })
+            );
+            earthGroup.add(objects.earth);
+
+            objects.clouds = new THREE.Mesh(
+                new THREE.SphereGeometry(1.02, 32, 32),
+                new THREE.MeshBasicMaterial({
+                    map: textures.clouds,
+                    transparent: true,
+                    opacity: 0.5,
+                    blending: THREE.AdditiveBlending,
+                    depthWrite: false
+                })
+            );
+            earthGroup.add(objects.clouds);
+
+            return earthGroup;
+        }
+        function buildSolarSystem() {
+            scene.add(objects.solarSystemGroup);
+
+            // 太阳光球
+            const sun = new THREE.Mesh(new THREE.SphereGeometry(12, 32, 32), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+            objects.solarSystemGroup.add(sun);
+            const sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({ map: textures.glow, color: 0xffaa00, transparent: true, blending: THREE.AdditiveBlending }));
+            sunGlow.scale.set(70, 70, 1); sun.add(sunGlow);
+            
+            // 宇宙主光源
+            scene.add(new THREE.PointLight(0xffffff, 2.2, 8000));
+            scene.add(new THREE.AmbientLight(0x222222)); // 环境柔和光，防止背光面死黑
+
+            const planetData = [
+                { name: '水星', r: 0.4, d: 30, c: 0x9e9e9e, s: 0.05 }, { name: '金星', r: 0.9, d: 50, c: 0xfff2cc, s: 0.03 },
+                { name: '地球', r: 1.0, d: 75, c: 0x4a90e2, s: 0.02, isEarth: true }, { name: '火星', r: 0.6, d: 100, c: 0xe74c3c, s: 0.016 },
+                { name: '木星', r: 4.8, d: 150, c: 0xeccc68, s: 0.009 }, { name: '土星', r: 3.8, d: 210, c: 0xf5cd79, s: 0.006, hasRing: true },
+                { name: '天王星', r: 2.5, d: 270, c: 0x70a1ff, s: 0.004 }, { name: '海王星', r: 2.4, d: 330, c: 0x1e90ff, s: 0.003 }
+            ];
+
+            planetData.forEach(p => {
+                const orbitGeo = new THREE.BufferGeometry(); const orbitPts = [];
+                for(let i=0; i<=60; i++) { let angle = (i / 60) * Math.PI * 2; orbitPts.push(Math.cos(angle)*p.d, 0, Math.sin(angle)*p.d); }
+                orbitGeo.setAttribute('position', new THREE.Float32BufferAttribute(orbitPts, 3));
+                const orbitLine = new THREE.Line(orbitGeo, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1 }));
+                objects.solarSystemGroup.add(orbitLine); objects.orbits.push(orbitLine);
+
+                let mesh = p.isEarth ? buildEarth() : new THREE.Mesh(new THREE.SphereGeometry(p.r, 16, 16), new THREE.MeshStandardMaterial({ color: p.c, roughness: 0.6 }));
+                if(p.hasRing) {
+                    const ring = new THREE.Mesh(new THREE.RingGeometry(p.r*1.4, p.r*2.3, 32), new THREE.MeshBasicMaterial({ color: p.c, side: THREE.DoubleSide, transparent: true, opacity: 0.5 }));
+                    ring.rotation.x = Math.PI/2 + 0.2; mesh.add(ring);
+                }
+                objects.solarSystemGroup.add(mesh); objects.planets.push({ mesh: mesh, data: p, angle: Math.random()*Math.PI*2 });
+            });
+
+            // 彗星
+            objects.comet = new THREE.Mesh(new THREE.SphereGeometry(0.5, 8, 8), new THREE.MeshBasicMaterial({ color: 0x00ffff }));
+            objects.solarSystemGroup.add(objects.comet);
+            const tailLen = 20; const tailGeo = new THREE.BufferGeometry(); const tailColors = new Float32Array(tailLen * 3);
+            for(let i=0; i<tailLen; i++) { let r = 1 - (i/tailLen); tailColors[i*3]=0; tailColors[i*3+1]=r; tailColors[i*3+2]=r; }
+            tailGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(tailLen*3), 3));
+            tailGeo.setAttribute('color', new THREE.BufferAttribute(tailColors, 3));
+            objects.cometTrail = new THREE.Line(tailGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.6 }));
+            objects.solarSystemGroup.add(objects.cometTrail);
+        }
+
+        function buildBlinkingStars() {
+            const count = 600; const geo = new THREE.BufferGeometry(); const pos = new Float32Array(count * 3);
+            for(let i=0; i<count; i++) {
+                const u = Math.random(); const v = Math.random();
+                const theta = u * 2.0 * Math.PI; const phi = Math.acos(2.0 * v - 1.0); const r = 3500 + Math.random() * 1000;
+                pos[i*3] = r * Math.sin(phi) * Math.cos(theta); pos[i*3+1] = r * Math.sin(phi) * Math.sin(theta); pos[i*3+2] = r * Math.cos(phi);
+            }
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            objects.ambientStars = new THREE.Points(geo, new THREE.PointsMaterial({
+                color: 0xffffff, size: 10, map: textures.glow, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, depthWrite: false
+            }));
+            scene.add(objects.ambientStars);
+        }
+
+        function buildGalaxy() {
+            const starCount = 6000; const geo = new THREE.BufferGeometry();
+            const pos = new Float32Array(starCount * 3); const colors = new Float32Array(starCount * 3);
+            const colorTheme = [new THREE.Color(0x4ab1ff), new THREE.Color(0xff9ff3), new THREE.Color(0xffffff)];
+
+            for(let i=0; i<starCount; i++) {
+                let r = Math.random() * 10000 + 600;
+                let theta = r * 0.0008 + (Math.random() * Math.PI * 0.4);
+                let arm = i % 2 === 0 ? 1 : -1;
+                pos[i*3] = Math.cos(theta) * r * arm + (Math.random()-0.5)*r*0.25;
+                pos[i*3+1] = (Math.random()-0.5)*250*(10000/r);
+                pos[i*3+2] = Math.sin(theta) * r * arm + (Math.random()-0.5)*r*0.25;
+                let c = colorTheme[Math.floor(Math.random() * colorTheme.length)];
+                colors[i*3]=c.r; colors[i*3+1]=c.g; colors[i*3+2]=b=c.b;
+            }
+            geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            objects.galaxyParticles = new THREE.Points(geo, new THREE.PointsMaterial({
+                size: 30, map: textures.glow, blending: THREE.AdditiveBlending, vertexColors: true, transparent: true, opacity: 0.2, depthWrite: false
+            }));
+            scene.add(objects.galaxyParticles);
+        }
+        // 初始化函数，配置相机、渲染器并构建场景
+        function init() {
+            const size = getSafeSize();
+            scene = new THREE.Scene();
+            
+            // 相机设置（透视相机，适合宇宙大场景）
+            camera = new THREE.PerspectiveCamera(60, size.width / size.height, 0.1, 50000);
+            camera.position.set(0, 150, 400);
+
+            // 渲染器设置（开启抗锯齿，优化移动端性能）
+            renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+            renderer.setSize(size.width, size.height);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // 轨道控制器设置（阻尼感、远近限制）
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.maxDistance = 15000;
+            controls.minDistance = 3;
+
+            // 调用前面生成的宇宙组件
+            buildSolarSystem();
+            buildBlinkingStars();
+            buildGalaxy();
+
+            // 场景加载完毕，淡出并移除 LOADING 提示
+            const loadingEl = document.getElementById('loading');
+            if (loadingEl) {
+                loadingEl.style.opacity = '0';
+                setTimeout(() => loadingEl.remove(), 600);
+            }
+        }
+
+        // 视口自适应（防碎屏、防画布塌陷）
+        window.addEventListener('resize', () => {
+            const size = getSafeSize();
+            if (camera && renderer) {
+                camera.aspect = size.width / size.height;
+                camera.updateProjectionMatrix();
+                renderer.setSize(size.width, size.height);
+            }
+        });
+        // 核心动画渲染循环（处理自转、公转、闪烁和彗星动力学）
+        function animate() {
+            requestAnimationFrame(animate);
+
+            time += 0.01;
+
+            // 1. 行星公转与自转
+            objects.planets.forEach(p => {
+                p.angle += p.data.s * 0.3; // 丝滑的公转速度
+                p.mesh.position.x = Math.cos(p.angle) * p.data.d;
+                p.mesh.position.z = Math.sin(p.angle) * p.data.d;
+                
+                // 特殊处理地球自转与云层流动
+                if(p.data.isEarth) {
+                    if(objects.earth) objects.earth.rotation.y += 0.004;
+                    if(objects.clouds) objects.clouds.rotation.y += 0.0055; // 云层稍快，形成气流感
+                } else {
+                    p.mesh.rotation.y += 0.015;
+                }
+            });
+
+            // 2. 银河系粒子系统极其微弱的整体旋转
+            if (objects.galaxyParticles) {
+                objects.galaxyParticles.rotation.y = time * 0.01;
+            }
+
+            // 3. 背景闪烁星空的极慢旋转
+            if (objects.ambientStars) {
+                objects.ambientStars.rotation.y = time * 0.001;
+            }
+
+            // 4. 彗星大椭圆轨道与动态粒子拖尾算法
+            if (objects.comet && objects.cometTrail) {
+                const cometSpeed = time * 0.15;
+                const a = 240; // 椭圆长半轴
+                const b = 100; // 椭圆短半轴
+                // 让彗星绕着中心太阳做非对称的偏心椭圆运动
+                const cx = Math.cos(cometSpeed) * a - 50; 
+                const cz = Math.sin(cometSpeed) * b;
+                
+                objects.comet.position.set(cx, 15, cz);
+
+                // 算法：迭代更新线条顶点坐标，将旧位置前移，尾部自然淡出
+                const posAttr = objects.cometTrail.geometry.attributes.position;
+                for (let i = posAttr.count - 1; i > 0; i--) {
+                    posAttr.setXYZ(i, posAttr.getX(i - 1), posAttr.getY(i - 1), posAttr.getZ(i - 1));
+                }
+                posAttr.setXYZ(0, cx, 15, cz); // 头部追随彗星核心
+                posAttr.needsUpdate = true;
+            }
+
+            // 更新轨道控制器（允许手势/鼠标惯性阻尼旋转）
+            if (controls) controls.update();
+
+            // 最终场景画面渲染
+            if (renderer && scene && camera) {
+                renderer.render(scene, camera);
+            }
+        }
+
+        // 核心引擎双火启动
+        init();
+        animate();
+    </script>
+</body>
+</html>
